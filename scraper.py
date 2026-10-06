@@ -1,1235 +1,1024 @@
+import argparse
+import hashlib
+import html
+import json
+import re
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
 import requests
 from bs4 import BeautifulSoup
-import json
-import hashlib
-import re
-import time
-import os
-import sys
-from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin
 
-
-# =========================================================
-# CONFIG
-# =========================================================
 
 BASE_URL = "https://medex.com.bd"
 BRANDS_URL = f"{BASE_URL}/brands"
 
-OUTPUT_DIR = Path("output")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-URL_FILE = OUTPUT_DIR / "medex_urls.json"
-
-BATCH_DIR = OUTPUT_DIR / "batches"
-BATCH_DIR.mkdir(exist_ok=True)
-
-FINAL_FILE = OUTPUT_DIR / "medex_medicines.json"
-
-FAILED_FILE = OUTPUT_DIR / "medex_failed.json"
-
-# Parallel workers per GitHub job
-WORKERS = 5
-
-# Small delay between requests
-REQUEST_DELAY = 0.25
-
-MAX_RETRIES = 4
-RETRY_DELAY = 2
-
-# Number of medicines in each batch
 BATCH_SIZE = 500
 
+REQUEST_DELAY = 0.30
+MAX_RETRIES = 5
+RETRY_DELAY = 2
 
-# =========================================================
-# HTTP HEADERS
-# =========================================================
+TIMEOUT = 30
 
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/140.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
 
 
-# =========================================================
-# DOSAGE FORMS
-# =========================================================
-
-DOSAGE_FORMS = [
-    "Dispersible Tablet",
-    "Chewable Tablet",
-    "Effervescent Tablet",
-    "Enteric Coated Tablet",
-    "Extended Release Tablet",
-    "Sustained Release Tablet",
-    "Film Coated Tablet",
-    "Soft Gelatin Capsule",
-    "Hard Capsule",
-    "Oral Suspension",
-    "Oral Solution",
-    "IV Infusion",
-    "IM Injection",
-    "IV Injection",
-    "Eye Drops",
-    "Ear Drops",
-    "Nasal Drops",
-    "Nasal Spray",
-    "Tablet",
-    "Capsule",
-    "Syrup",
-    "Suspension",
-    "Solution",
-    "Injection",
-    "Infusion",
-    "Cream",
-    "Ointment",
-    "Gel",
-    "Lotion",
-    "Drops",
-    "Spray",
-    "Inhaler",
-    "Powder",
-    "Granules",
-    "Suppository",
-    "Pessary",
-    "Mouthwash",
-    "Shampoo",
-    "Soap",
-    "Paint",
-    "Kit",
-    "Patch",
-    "Lozenge",
-]
-
-
-BAD_VALUES = {
-    "indication",
+SECTION_HEADINGS = {
     "indications",
-    "dosage",
-    "dosage & administration",
-    "administration",
-    "description",
     "pharmacology",
+    "dosage",
+    "administration",
+    "interaction",
     "contraindications",
     "side effects",
+    "pregnancy & lactation",
     "precautions & warnings",
+    "overdose effects",
     "therapeutic class",
     "storage conditions",
-    "pregnancy & lactation",
-    "interaction",
+    "pack size & price",
 }
 
 
-# =========================================================
-# UTILITIES
-# =========================================================
+DOSAGE_FORMS = {
+    "tablet",
+    "capsule",
+    "soft gelatin capsule",
+    "hard gelatin capsule",
+    "syrup",
+    "suspension",
+    "solution",
+    "oral solution",
+    "oral suspension",
+    "oral gel",
+    "gel",
+    "cream",
+    "ointment",
+    "lotion",
+    "powder",
+    "injection",
+    "injection solution",
+    "infusion",
+    "eye drop",
+    "eye drops",
+    "ear drop",
+    "ear drops",
+    "nasal drop",
+    "nasal drops",
+    "nasal spray",
+    "spray",
+    "cream",
+    "ointment",
+    "suppository",
+    "pessary",
+    "mouthwash",
+    "mouth rinse",
+    "inhaler",
+    "respules",
+    "nebules",
+    "dry powder inhaler",
+    "metered dose inhaler",
+    "topical solution",
+    "topical gel",
+    "oral powder",
+    "granules",
+    "lozenge",
+    "chewable tablet",
+    "dispersible tablet",
+    "effervescent tablet",
+    "extended release tablet",
+    "sustained release tablet",
+    "modified release tablet",
+    "enteric coated tablet",
+    "film coated tablet",
+    "controlled release tablet",
+    "vaginal cream",
+    "vaginal tablet",
+}
+
 
 def clean_text(value):
-
     if not value:
         return ""
 
+    value = html.unescape(str(value))
     value = value.replace("\xa0", " ")
-
     value = re.sub(r"\s+", " ", value)
-
     return value.strip()
 
 
 def normalize_url(url):
-
     if not url:
-        return None
+        return ""
 
     url = url.strip()
 
     if url.startswith("/"):
-        url = urljoin(BASE_URL, url)
+        return urljoin(BASE_URL, url)
 
-    url = url.split("?")[0]
-    url = url.split("#")[0]
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
 
-    return url.rstrip("/")
-
-
-def is_medicine_url(url):
-
-    if not url:
-        return False
-
-    return bool(
-        re.match(
-            r"^https://medex\.com\.bd/brands/\d+/.+",
-            url
-        )
-    )
+    return url
 
 
-# =========================================================
-# REQUEST
-# =========================================================
+def get_session():
+    session = requests.Session()
+    session.headers.update(HEADERS)
+    return session
 
-def get_page(url):
 
+def get_page(session, url):
     for attempt in range(1, MAX_RETRIES + 1):
-
         try:
-
-            response = requests.get(
+            response = session.get(
                 url,
-                headers=HEADERS,
-                timeout=30
+                timeout=TIMEOUT,
+                allow_redirects=True,
             )
 
             if response.status_code == 200:
                 return response.text
 
+            if response.status_code in (403, 429, 500, 502, 503, 504):
+                wait = RETRY_DELAY * attempt
+                print(
+                    f"    HTTP {response.status_code}; "
+                    f"retry {attempt}/{MAX_RETRIES} after {wait}s"
+                )
+                time.sleep(wait)
+                continue
+
+            print(f"    HTTP {response.status_code}")
+            return None
+
+        except requests.RequestException as exc:
+            wait = RETRY_DELAY * attempt
             print(
-                f"[HTTP {response.status_code}] {url}",
-                flush=True
+                f"    Request error: {exc}; "
+                f"retry {attempt}/{MAX_RETRIES} after {wait}s"
             )
-
-        except Exception as e:
-
-            print(
-                f"[ERROR] {url} -> {e}",
-                flush=True
-            )
-
-        if attempt < MAX_RETRIES:
-            time.sleep(RETRY_DELAY)
+            time.sleep(wait)
 
     return None
 
 
-# =========================================================
-# JSON
-# =========================================================
-
-def save_json(path, data):
-
-    path = Path(path)
-
-    temp = Path(
-        str(path) + ".tmp"
-    )
-
-    with open(
-        temp,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
-        )
-
-    temp.replace(path)
-
-
-def load_json(path, default):
-
-    path = Path(path)
-
-    if not path.exists():
-        return default
-
-    try:
-
-        with open(
-            path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            return json.load(f)
-
-    except Exception:
-
-        return default
-
-
-# =========================================================
+# ---------------------------------------------------------
 # DISCOVERY
-# =========================================================
+# ---------------------------------------------------------
 
-def extract_medicine_links(html):
+def extract_medicine_links(html_text):
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
+    links = set()
 
-    urls = set()
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "").strip()
 
-    for a in soup.find_all(
-        "a",
-        href=True
-    ):
+        if re.match(r"^/brands/\d+/.+", href):
+            links.add(normalize_url(href))
 
-        url = normalize_url(
-            a.get("href")
-        )
-
-        if is_medicine_url(url):
-            urls.add(url)
-
-    return urls
+    return links
 
 
 def discover_urls():
-
-    print(
-        "\n======================================"
-    )
-    print(
-        "MEDEx URL DISCOVERY"
-    )
-    print(
-        "======================================\n"
-    )
-
-    urls = set()
+    all_urls = set()
 
     page = 1
 
     while True:
-
         if page == 1:
             url = BRANDS_URL
         else:
             url = f"{BRANDS_URL}?page={page}"
 
-        print(
-            f"[DISCOVERY] Page {page}",
-            flush=True
-        )
+        print(f"[DISCOVERY] Page {page}: {url}")
 
-        html = get_page(url)
+        session = get_session()
+        html_text = get_page(session, url)
 
-        if not html:
-
-            print(
-                "[STOP] Page unavailable",
-                flush=True
-            )
-
+        if not html_text:
+            print("  Failed to load discovery page.")
             break
 
-        found = extract_medicine_links(
-            html
-        )
+        links = extract_medicine_links(html_text)
 
-        print(
-            f"  Found: {len(found)}",
-            flush=True
-        )
+        print(f"  Found {len(links)} medicine links")
 
-        if not found:
+        before = len(all_urls)
+        all_urls.update(links)
+        after = len(all_urls)
 
-            print(
-                "[STOP] No more medicine links",
-                flush=True
-            )
+        print(f"  Total unique URLs: {after}")
 
+        # Stop if page has no medicine links
+        if not links:
             break
 
-        old = len(urls)
-
-        urls.update(found)
-
-        new = len(urls) - old
-
-        print(
-            f"  New: {new}",
-            flush=True
-        )
-
-        print(
-            f"  Total: {len(urls)}",
-            flush=True
-        )
+        # Stop if page is no longer adding anything
+        if after == before:
+            print("  No new URLs found. Discovery finished.")
+            break
 
         page += 1
 
-        time.sleep(REQUEST_DELAY)
+        time.sleep(0.5)
 
-    urls = sorted(urls)
+        # Safety limit
+        if page > 5000:
+            print("Safety limit reached.")
+            break
 
-    save_json(
-        URL_FILE,
-        urls
-    )
+    urls = sorted(all_urls)
 
-    print(
-        f"\nTotal medicine URLs: {len(urls)}"
-    )
+    print()
+    print("=" * 60)
+    print(f"DISCOVERY COMPLETE")
+    print(f"Total medicine URLs: {len(urls)}")
+    print("=" * 60)
 
     return urls
 
 
-# =========================================================
-# FIELD EXTRACTION
-# =========================================================
+# ---------------------------------------------------------
+# PARSING HELPERS
+# ---------------------------------------------------------
 
-def extract_name(soup):
+def get_title_parts(soup):
+    title = ""
 
-    h1 = soup.find("h1")
+    if soup.title:
+        title = clean_text(soup.title.get_text(" ", strip=True))
 
-    if not h1:
+    if not title:
+        return []
+
+    return [
+        clean_text(part)
+        for part in title.split("|")
+        if clean_text(part)
+    ]
+
+
+def get_h1(soup):
+    """
+    Primary brand-name source.
+
+    Example:
+    <h1>A-Migel</h1>
+
+    We deliberately do NOT derive the name from dosage text.
+    """
+
+    candidates = []
+
+    for h1 in soup.find_all("h1"):
+        text = clean_text(h1.get_text(" ", strip=True))
+
+        if text:
+            candidates.append(text)
+
+    if not candidates:
         return ""
 
-    name = clean_text(
-        h1.get_text(
-            " ",
-            strip=True
-        )
-    )
+    # Prefer short h1 values that are not section headings.
+    for value in candidates:
+        if value.lower() not in SECTION_HEADINGS:
+            return value
 
-    if name.lower() in BAD_VALUES:
-        return ""
-
-    return name
+    return candidates[0]
 
 
-def extract_generic(soup):
+def looks_like_section_heading(value):
+    if not value:
+        return True
 
-    # Strong method:
-    # find links pointing to generic pages
-
-    for a in soup.find_all(
-        "a",
-        href=True
-    ):
-
-        href = a.get("href", "")
-
-        if "/generics/" in href:
-
-            value = clean_text(
-                a.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            if (
-                value
-                and value.lower() not in BAD_VALUES
-                and len(value) < 150
-            ):
-
-                return value
-
-    return ""
+    return value.strip().lower() in SECTION_HEADINGS
 
 
-def extract_company(soup):
-
-    for a in soup.find_all(
-        "a",
-        href=True
-    ):
-
-        href = a.get("href", "")
-
-        if "/companies/" in href:
-
-            value = clean_text(
-                a.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            if value:
-                return value
-
-    return ""
-
-
-def looks_like_strength(value):
-
+def looks_like_company(value):
     if not value:
         return False
 
-    return bool(
-        re.search(
-            r"\d+(?:\.\d+)?\s*"
-            r"(?:mg|mcg|g|kg|ml|l|iu|%)",
-            value,
-            flags=re.I
-        )
-    )
+    lower = value.lower()
+
+    company_words = [
+        "ltd.",
+        "limited",
+        "pharmaceutical",
+        "pharmaceuticals",
+        "laboratories",
+        "lab.",
+        "healthcare",
+        "health care",
+        "industries",
+        "enterprise",
+        "company",
+        "plc",
+        "pharma",
+    ]
+
+    return any(word in lower for word in company_words)
 
 
-def extract_strength_from_text(text):
+def looks_like_strength(value):
+    if not value:
+        return False
 
-    if not text:
-        return ""
+    value = clean_text(value)
 
-    pattern = r"""
-        \d+(?:\.\d+)?\s*
-        (?:mg|mcg|g|kg|ml|l|iu|%)
-        (?:
-            \s*/\s*
-            \d+(?:\.\d+)?\s*
-            (?:mg|mcg|g|kg|ml|l|iu|%)
-        )*
+    patterns = [
+        r"\d+\s*mg\b",
+        r"\d+\s*mcg\b",
+        r"\d+\s*g\b",
+        r"\d+\s*kg\b",
+        r"\d+\s*iu\b",
+        r"\d+\s*%\s*(w/w|w/v|v/v)?",
+        r"\d+\s*(mg|mcg|g)\s*/\s*\d+\s*(ml|g|dose)",
+        r"\d+\s*mg\s*/\s*\d+\s*ml",
+        r"\d+\s*mg\s*\+\s*",
+        r"\d+\s*mcg\s*\+\s*",
+        r"\d+\s*mg\s*/\s*vial",
+        r"\(\s*\d+",
+    ]
+
+    return any(re.search(pattern, value, re.I) for pattern in patterns)
+
+
+def find_dosage_from_image(soup):
+    """
+    MedEx commonly exposes dosage form in image alt text.
+
+    Example:
+    Image: Oral Gel
     """
 
-    match = re.search(
-        pattern,
-        text,
-        flags=re.I | re.X
-    )
+    for img in soup.find_all("img"):
+        alt = clean_text(img.get("alt", ""))
 
-    if match:
+        if not alt:
+            continue
 
-        return clean_text(
-            match.group(0)
-        )
+        alt_clean = re.sub(
+            r"^(image|photo|picture)\s*:\s*",
+            "",
+            alt,
+            flags=re.I,
+        ).strip()
 
-    return ""
+        if alt_clean.lower() in DOSAGE_FORMS:
+            return alt_clean
 
-
-def extract_strength(soup):
-
-    # First check H1 parent
-    h1 = soup.find("h1")
-
-    if h1:
-
-        parent = h1.parent
-
-        if parent:
-
-            text = clean_text(
-                parent.get_text(
-                    " ",
-                    strip=True
-                )
-            )
-
-            value = extract_strength_from_text(
-                text
-            )
-
-            if value:
-                return value
-
-    # Page title
-    title = soup.find("title")
-
-    if title:
-
-        text = clean_text(
-            title.get_text(
-                " ",
-                strip=True
-            )
-        )
-
-        value = extract_strength_from_text(
-            text
-        )
-
-        if value:
-            return value
+        # Handle duplicated values such as:
+        # "Oral Gel Oral Gel"
+        for dosage in sorted(DOSAGE_FORMS, key=len, reverse=True):
+            if alt_clean.lower() == f"{dosage} {dosage}":
+                return dosage.title()
 
     return ""
 
 
-def detect_dosage_form(text):
+def find_dosage_from_text(soup):
+    """
+    Controlled vocabulary fallback.
+    """
 
-    if not text:
-        return ""
+    text = clean_text(soup.get_text(" ", strip=True))
 
-    text = clean_text(text)
+    # Prefer longer dosage forms first.
+    sorted_forms = sorted(DOSAGE_FORMS, key=len, reverse=True)
 
-    for form in sorted(
-        DOSAGE_FORMS,
-        key=len,
-        reverse=True
-    ):
+    for dosage in sorted_forms:
+        pattern = r"\b" + re.escape(dosage) + r"\b"
 
-        if re.search(
-            rf"\b{re.escape(form)}\b",
-            text,
-            flags=re.I
-        ):
-
-            return form
+        if re.search(pattern, text, re.I):
+            return dosage.title()
 
     return ""
 
 
-def extract_dosage(soup, url):
+def find_generic(soup):
+    """
+    Prefer links to /generics/.
+    """
 
-    # Look around H1
-    h1 = soup.find("h1")
+    candidates = []
 
-    if h1:
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
 
-        parent = h1.parent
+        if "/generics/" in href:
+            text = clean_text(a.get_text(" ", strip=True))
 
-        if parent:
+            if text and not looks_like_section_heading(text):
+                candidates.append(text)
 
-            value = detect_dosage_form(
-                parent.get_text(
-                    " ",
-                    strip=True
-                )
-            )
+    if candidates:
+        # Usually the first matching generic is the product generic.
+        return candidates[0]
 
-            if value:
-                return value
-
-    # URL fallback
-    slug = url.split("/")[-1]
-    slug = slug.replace("-", " ")
-
-    return detect_dosage_form(slug)
+    return ""
 
 
-# =========================================================
-# NAME CLEANUP
-# =========================================================
+def find_company(soup, title_parts):
+    """
+    First try title structure:
+    A-Migel | 2% w/w | Oral Gel | Bengali title | ACME Laboratories Ltd.
+    
+    But because title structures can vary, only accept a title part
+    when it strongly looks like a company.
+    """
 
-def clean_medicine_name(
-    name,
-    dosage
-):
+    for part in title_parts:
+        if looks_like_company(part):
+            return part
+
+    # Search links/text containing company-like wording.
+    candidates = []
+
+    for a in soup.find_all("a", href=True):
+        text = clean_text(a.get_text(" ", strip=True))
+
+        if looks_like_company(text):
+            candidates.append(text)
+
+    if candidates:
+        return candidates[0]
+
+    # Look around product summary.
+    text_nodes = soup.find_all(string=True)
+
+    for node in text_nodes:
+        text = clean_text(node)
+
+        if looks_like_company(text) and len(text) < 150:
+            return text
+
+    return ""
+
+
+def find_strength(soup, title_parts):
+    """
+    Prefer title second part when it looks like strength.
+    """
+
+    for part in title_parts:
+        if looks_like_strength(part):
+            return part
+
+    # Search visible short text nodes.
+    for node in soup.find_all(string=True):
+        text = clean_text(node)
+
+        if 1 <= len(text) <= 100 and looks_like_strength(text):
+            return text
+
+    return ""
+
+
+def remove_known_suffix_from_name(name):
+    """
+    Safety cleanup.
+
+    This is NOT the primary name extraction.
+    It only protects against bad fallback values such as:
+
+    A-Migel Oral Gel
+    A-Migel Tablet
+    A-Migel 2% w/w
+    """
 
     name = clean_text(name)
 
-    if not name:
-        return ""
+    # Remove dosage forms at end.
+    for dosage in sorted(DOSAGE_FORMS, key=len, reverse=True):
+        pattern = r"\s+" + re.escape(dosage) + r"\s*$"
+        name = re.sub(pattern, "", name, flags=re.I)
 
-    if dosage:
-
-        # Remove:
-        # Tablet
-        # Tablet Tablet
-        # Capsule Capsule
-        # etc.
-
-        pattern = (
-            rf"(?:\s+{re.escape(dosage)})+$"
-        )
-
-        name = re.sub(
-            pattern,
-            "",
-            name,
-            flags=re.I
-        ).strip()
-
-    return name
-
-
-# =========================================================
-# URL FALLBACK
-# =========================================================
-
-def fallback_name_from_url(url):
-
-    slug = url.split("/")[-1]
-
-    slug = slug.replace(
-        "-",
-        " "
+    # Remove trailing strength.
+    strength_pattern = (
+        r"\s+"
+        r"(?:"
+        r"\d+(?:\.\d+)?\s*(?:mg|mcg|g|kg|iu|%)"
+        r"(?:\s*(?:w/w|w/v|v/v))?"
+        r"(?:\s*/\s*\d+\s*(?:ml|g|dose|vial))?"
+        r"|"
+        r"\(\s*[^)]*(?:mg|mcg|g|iu|%)\s*[^)]*\)"
+        r")"
+        r"\s*$"
     )
 
-    return clean_text(slug)
-
-
-def fallback_strength_from_url(url):
-
-    slug = url.split("/")[-1]
-
-    slug = slug.replace(
-        "-",
-        " "
+    name = re.sub(
+        strength_pattern,
+        "",
+        name,
+        flags=re.I,
     )
 
-    return extract_strength_from_text(
-        slug
-    )
+    return clean_text(name)
 
 
-# =========================================================
-# VALIDATION
-# =========================================================
-
-def validate(record):
-
+def validate_record(record):
     reasons = []
 
-    if not record["name"]:
-        reasons.append(
-            "missing_name"
-        )
+    name = record.get("name", "")
+    generic = record.get("generic_name", "")
+    dosage = record.get("dosage", "")
+    strength = record.get("strength", "")
+    company = record.get("company", "")
 
-    if not record["generic_name"]:
-        reasons.append(
-            "missing_generic"
-        )
+    if not name:
+        reasons.append("missing_name")
 
-    if record["generic_name"].lower() in BAD_VALUES:
-        reasons.append(
-            "invalid_generic"
-        )
+    if len(name) > 150:
+        reasons.append("name_too_long")
 
-    if len(
-        record["generic_name"]
-    ) > 150:
+    if looks_like_section_heading(name):
+        reasons.append("name_is_section_heading")
 
-        reasons.append(
-            "generic_too_long"
-        )
-
-    if record["strength"]:
-
-        if not looks_like_strength(
-            record["strength"]
+    # Detect obvious contamination.
+    for dosage_form in DOSAGE_FORMS:
+        if re.search(
+            r"\s+" + re.escape(dosage_form) + r"\s*$",
+            name,
+            re.I,
         ):
+            reasons.append("name_contains_dosage")
 
-            reasons.append(
-                "invalid_strength"
-            )
+    if generic and looks_like_section_heading(generic):
+        reasons.append("generic_is_section_heading")
 
-    if not record["unit_dosage"]:
+    if not generic:
+        reasons.append("missing_generic")
 
-        reasons.append(
-            "missing_dosage"
-        )
+    if not strength:
+        reasons.append("missing_strength")
 
-    if not record["company"]:
+    if not dosage:
+        reasons.append("missing_dosage")
 
-        reasons.append(
-            "missing_company"
-        )
+    if not company:
+        reasons.append("missing_company")
+
+    if company and looks_like_section_heading(company):
+        reasons.append("company_is_section_heading")
 
     return reasons
 
 
-# =========================================================
-# ID
-# =========================================================
+# ---------------------------------------------------------
+# PRODUCT PARSER
+# ---------------------------------------------------------
 
-def create_id(record):
+def parse_medicine_page(url, html_text):
+    soup = BeautifulSoup(html_text, "html.parser")
 
-    raw = "|".join([
-        record["name"].lower(),
-        record["strength"].lower(),
-        record["generic_name"].lower(),
-        record["unit_dosage"].lower(),
-        record["company"].lower()
-    ])
+    title_parts = get_title_parts(soup)
 
-    return hashlib.sha256(
-        raw.encode("utf-8")
-    ).hexdigest()[:24]
+    # -----------------------------------------------------
+    # NAME
+    # -----------------------------------------------------
 
+    name = get_h1(soup)
 
-# =========================================================
-# PARSE
-# =========================================================
+    # Strong fallback: first title segment.
+    if not name and title_parts:
+        name = title_parts[0]
 
-def parse_medicine(url):
+    name = remove_known_suffix_from_name(name)
 
-    html = get_page(url)
+    # -----------------------------------------------------
+    # GENERIC
+    # -----------------------------------------------------
 
-    if not html:
-        return None
+    generic = find_generic(soup)
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser"
-    )
+    # Some MedEx pages expose generic as product-summary text.
+    # Use title / visible text only as fallback.
+    if not generic:
+        for part in title_parts:
+            if (
+                part
+                and part != name
+                and not looks_like_strength(part)
+                and not looks_like_company(part)
+                and part.lower() not in {
+                    x.lower() for x in DOSAGE_FORMS
+                }
+                and not looks_like_section_heading(part)
+                and len(part) < 200
+            ):
+                # Avoid Bengali title when English generic is available.
+                if re.search(r"[A-Za-z]", part):
+                    generic = part
+                    break
 
-    name = extract_name(
-        soup
-    )
+    # -----------------------------------------------------
+    # STRENGTH
+    # -----------------------------------------------------
 
-    generic = extract_generic(
-        soup
-    )
+    strength = find_strength(soup, title_parts)
 
-    strength = extract_strength(
-        soup
-    )
+    # -----------------------------------------------------
+    # DOSAGE
+    # -----------------------------------------------------
 
-    dosage = extract_dosage(
-        soup,
-        url
-    )
+    dosage = find_dosage_from_image(soup)
 
-    company = extract_company(
-        soup
-    )
+    if not dosage:
+        # Title normally contains:
+        # Brand | Strength | Dosage | ...
+        for part in title_parts:
+            if part.lower() in {
+                x.lower() for x in DOSAGE_FORMS
+            }:
+                dosage = part
+                break
 
-    # Fallbacks
+    if not dosage:
+        dosage = find_dosage_from_text(soup)
 
-    if not name:
+    # -----------------------------------------------------
+    # COMPANY
+    # -----------------------------------------------------
 
-        name = fallback_name_from_url(
-            url
-        )
+    company = find_company(soup, title_parts)
 
-    if not strength:
-
-        strength = fallback_strength_from_url(
-            url
-        )
-
-    # IMPORTANT:
-    # Remove duplicate dosage from name
-
-    name = clean_medicine_name(
-        name,
-        dosage
-    )
+    # -----------------------------------------------------
+    # REVIEW
+    # -----------------------------------------------------
 
     record = {
         "id": "",
         "name": name,
-        "strength": strength,
         "generic_name": generic,
-        "unit_dosage": dosage,
+        "strength": strength,
+        "dosage": dosage,
         "company": company,
         "source_url": url,
         "needs_review": False,
-        "review_reasons": []
+        "review_reasons": [],
     }
 
-    reasons = validate(
-        record
+    reasons = validate_record(record)
+
+    record["needs_review"] = len(reasons) > 0
+    record["review_reasons"] = reasons
+
+    # Deterministic ID
+    identity = "|".join(
+        [
+            clean_text(name).lower(),
+            clean_text(generic).lower(),
+            clean_text(strength).lower(),
+            clean_text(dosage).lower(),
+            clean_text(company).lower(),
+        ]
     )
 
-    if reasons:
-
-        record["needs_review"] = True
-        record["review_reasons"] = reasons
-
-    record["id"] = create_id(
-        record
-    )
+    record["id"] = hashlib.sha256(
+        identity.encode("utf-8")
+    ).hexdigest()[:24]
 
     return record
 
 
-# =========================================================
-# BATCH
-# =========================================================
+# ---------------------------------------------------------
+# BATCH SCRAPING
+# ---------------------------------------------------------
 
-def get_batch_number():
+def load_urls(path):
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    if len(sys.argv) < 2:
+    if isinstance(data, dict):
+        urls = data.get("urls", [])
+    else:
+        urls = data
 
-        print(
-            "Usage: python scraper.py batch 1"
-        )
-
-        sys.exit(1)
-
-    try:
-
-        return int(
-            sys.argv[2]
-        )
-
-    except:
-
-        print(
-            "Invalid batch number"
-        )
-
-        sys.exit(1)
-
-
-def scrape_batch(
-    urls,
-    batch_number
-):
-
-    total = len(urls)
-
-    start = (
-        batch_number - 1
-    ) * BATCH_SIZE
-
-    end = min(
-        start + BATCH_SIZE,
-        total
-    )
-
-    batch_urls = urls[
-        start:end
+    return [
+        normalize_url(url)
+        for url in urls
+        if normalize_url(url)
     ]
 
-    print(
-        "\n======================================"
-    )
 
-    print(
-        f"BATCH {batch_number}"
-    )
+def scrape_batch(urls, batch_number, output_dir):
+    start = (batch_number - 1) * BATCH_SIZE
+    end = start + BATCH_SIZE
 
-    print(
-        f"URLs {start + 1} - {end}"
-    )
+    batch_urls = urls[start:end]
 
-    print(
-        f"Total in batch: {len(batch_urls)}"
-    )
-
-    print(
-        "======================================\n"
-    )
+    print()
+    print("=" * 70)
+    print(f"BATCH {batch_number}")
+    print(f"URL range: {start + 1} - {min(end, len(urls))}")
+    print(f"Batch size: {len(batch_urls)}")
+    print("=" * 70)
 
     if not batch_urls:
-
-        print(
-            "No URLs in this batch."
-        )
-
-        return
-
-    results = []
-
-    failed = []
-
-    # Thread worker
-    def worker(url):
-
-        time.sleep(
-            REQUEST_DELAY
-        )
-
-        return (
-            url,
-            parse_medicine(url)
-        )
-
-    with ThreadPoolExecutor(
-        max_workers=WORKERS
-    ) as executor:
-
-        futures = {
-            executor.submit(
-                worker,
-                url
-            ): url
-
-            for url in batch_urls
+        print("No URLs in this batch.")
+        return {
+            "batch": batch_number,
+            "success": 0,
+            "failed": 0,
+            "records": [],
         }
 
-        completed = 0
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-        for future in as_completed(
-            futures
-        ):
+    session = get_session()
 
-            url = futures[
-                future
-            ]
+    records = []
+    failed = []
 
-            completed += 1
+    for index, url in enumerate(batch_urls, start=1):
 
-            try:
+        print(
+            f"[{index}/{len(batch_urls)}] ",
+            end="",
+            flush=True,
+        )
 
-                url, record = future.result()
+        html_text = get_page(session, url)
 
-                if record:
+        if not html_text:
+            print("[FAILED]")
+            failed.append(url)
+            continue
 
-                    results.append(
-                        record
-                    )
+        try:
+            record = parse_medicine_page(
+                url,
+                html_text,
+            )
 
-                    print(
-                        f"[{completed}/{len(batch_urls)}] "
-                        f"[OK] "
-                        f"{record['name']}",
-                        flush=True
-                    )
+            records.append(record)
 
-                else:
+            status = "REVIEW" if record["needs_review"] else "OK"
 
-                    failed.append(
-                        url
-                    )
+            print(
+                f"[{status}] {record['name']}"
+            )
 
-                    print(
-                        f"[{completed}/{len(batch_urls)}] "
-                        f"[FAILED] "
-                        f"{url}",
-                        flush=True
-                    )
-
-            except Exception as e:
-
-                failed.append(
-                    url
-                )
-
+            if index <= 15:
                 print(
-                    f"[{completed}/{len(batch_urls)}] "
-                    f"[ERROR] {url} -> {e}",
-                    flush=True
+                    f"       Strength : {record['strength']}"
+                )
+                print(
+                    f"       Generic  : {record['generic_name']}"
+                )
+                print(
+                    f"       Dosage   : {record['dosage']}"
+                )
+                print(
+                    f"       Company  : {record['company']}"
                 )
 
-    # =====================================================
-    # SAVE BATCH
-    # =====================================================
+        except Exception as exc:
+            print(f"[PARSE ERROR] {exc}")
+            failed.append(url)
 
-    batch_file = (
-        BATCH_DIR
-        / f"batch_{batch_number:03d}.json"
+        time.sleep(REQUEST_DELAY)
+
+    batch_data = {
+        "batch": batch_number,
+        "total_urls": len(batch_urls),
+        "success": len(records),
+        "failed": len(failed),
+        "failed_urls": failed,
+        "records": records,
+    }
+
+    output_file = (
+        output_dir /
+        f"batch_{batch_number:03d}.json"
     )
 
-    save_json(
-        batch_file,
-        results
+    with open(
+        output_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            batch_data,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    print()
+    print("=" * 70)
+    print(f"BATCH {batch_number} COMPLETE")
+    print(f"Success: {len(records)}")
+    print(f"Failed : {len(failed)}")
+    print(f"Review : {sum(1 for x in records if x['needs_review'])}")
+    print(f"Saved  : {output_file}")
+    print("=" * 70)
+
+    return batch_data
+
+
+# ---------------------------------------------------------
+# MERGE
+# ---------------------------------------------------------
+
+def merge_batches(batch_dir, output_file):
+    batch_dir = Path(batch_dir)
+
+    files = sorted(
+        batch_dir.glob("batch_*.json")
     )
 
-    failed_file = (
-        BATCH_DIR
-        / f"failed_{batch_number:03d}.json"
+    print(f"Found {len(files)} batch files.")
+
+    all_records = []
+    failed_urls = []
+
+    seen_ids = set()
+    duplicate_count = 0
+
+    for file in files:
+        try:
+            with open(
+                file,
+                "r",
+                encoding="utf-8",
+            ) as f:
+                data = json.load(f)
+
+            for record in data.get("records", []):
+
+                record_id = record.get("id")
+
+                if record_id in seen_ids:
+                    duplicate_count += 1
+                    continue
+
+                seen_ids.add(record_id)
+                all_records.append(record)
+
+            failed_urls.extend(
+                data.get("failed_urls", [])
+            )
+
+        except Exception as exc:
+            print(
+                f"Could not read {file}: {exc}"
+            )
+
+    final = {
+        "source": "MedEx Bangladesh",
+        "total_records": len(all_records),
+        "total_failed": len(failed_urls),
+        "duplicate_records_removed": duplicate_count,
+        "records_needing_review": sum(
+            1
+            for record in all_records
+            if record.get("needs_review")
+        ),
+        "failed_urls": sorted(set(failed_urls)),
+        "records": all_records,
+    }
+
+    output_file = Path(output_file)
+    output_file.parent.mkdir(
+        parents=True,
+        exist_ok=True,
     )
 
-    save_json(
-        failed_file,
-        failed
-    )
+    with open(
+        output_file,
+        "w",
+        encoding="utf-8",
+    ) as f:
+        json.dump(
+            final,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
+    print()
+    print("=" * 70)
+    print("MERGE COMPLETE")
+    print(f"Records : {len(all_records)}")
+    print(f"Failed  : {len(set(failed_urls))}")
+    print(f"Duplicates removed: {duplicate_count}")
     print(
-        "\n======================================"
+        "Needs review:",
+        final["records_needing_review"],
     )
-
-    print(
-        f"BATCH {batch_number} COMPLETE"
-    )
-
-    print(
-        f"Success: {len(results)}"
-    )
-
-    print(
-        f"Failed : {len(failed)}"
-    )
-
-    print(
-        f"Saved  : {batch_file}"
-    )
-
-    print(
-        "======================================"
-    )
+    print(f"Saved: {output_file}")
+    print("=" * 70)
 
 
-# =========================================================
+# ---------------------------------------------------------
 # MAIN
-# =========================================================
+# ---------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser()
 
-    command = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else ""
+    parser.add_argument(
+        "--discover",
+        action="store_true",
     )
 
-    # ---------------------------------------------
+    parser.add_argument(
+        "--urls-file",
+        default="medex_urls.json",
+    )
+
+    parser.add_argument(
+        "--batch",
+        type=int,
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        default="output/batches",
+    )
+
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--batch-dir",
+        default="output/batches",
+    )
+
+    parser.add_argument(
+        "--output-file",
+        default="output/medex_medicines.json",
+    )
+
+    args = parser.parse_args()
+
     # DISCOVERY
-    # ---------------------------------------------
+    if args.discover:
+        urls = discover_urls()
 
-    if command == "discover":
+        with open(
+            args.urls_file,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                {
+                    "total": len(urls),
+                    "urls": urls,
+                },
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
 
-        discover_urls()
+        print(
+            f"Saved URL list: {args.urls_file}"
+        )
 
         return
 
-    # ---------------------------------------------
     # BATCH
-    # ---------------------------------------------
+    if args.batch is not None:
 
-    if command == "batch":
-
-        batch_number = get_batch_number()
-
-        urls = load_json(
-            URL_FILE,
-            []
+        urls = load_urls(
+            args.urls_file
         )
-
-        if not urls:
-
-            print(
-                "URL list not found."
-            )
-
-            print(
-                "Run: python scraper.py discover"
-            )
-
-            sys.exit(1)
 
         scrape_batch(
             urls,
-            batch_number
+            args.batch,
+            args.output_dir,
         )
 
         return
 
-    # ---------------------------------------------
     # MERGE
-    # ---------------------------------------------
+    if args.merge:
 
-    if command == "merge":
-
-        merge_batches()
+        merge_batches(
+            args.batch_dir,
+            args.output_file,
+        )
 
         return
 
-    print(
-        """
-Commands:
-
-python scraper.py discover
-python scraper.py batch 1
-python scraper.py batch 2
-python scraper.py merge
-"""
-    )
-
-
-# =========================================================
-# MERGE FUNCTION
-# =========================================================
-
-def merge_batches():
-
-    print(
-        "\n======================================"
-    )
-
-    print(
-        "MERGING BATCHES"
-    )
-
-    print(
-        "======================================\n"
-    )
-
-    all_records = []
-    seen_ids = set()
-
-    for file in sorted(
-        BATCH_DIR.glob(
-            "batch_*.json"
-        )
-    ):
-
-        records = load_json(
-            file,
-            []
-        )
-
-        print(
-            f"{file.name}: "
-            f"{len(records)}"
-        )
-
-        for record in records:
-
-            record_id = record.get(
-                "id"
-            )
-
-            if (
-                record_id
-                and record_id not in seen_ids
-            ):
-
-                seen_ids.add(
-                    record_id
-                )
-
-                all_records.append(
-                    record
-                )
-
-    save_json(
-        FINAL_FILE,
-        all_records
-    )
-
-    # Merge failed URLs
-
-    failed = []
-
-    for file in sorted(
-        BATCH_DIR.glob(
-            "failed_*.json"
-        )
-    ):
-
-        data = load_json(
-            file,
-            []
-        )
-
-        failed.extend(
-            data
-        )
-
-    failed = sorted(
-        set(failed)
-    )
-
-    save_json(
-        FAILED_FILE,
-        failed
-    )
-
-    print(
-        "\n======================================"
-    )
-
-    print(
-        "MERGE COMPLETE"
-    )
-
-    print(
-        f"Total medicines: "
-        f"{len(all_records)}"
-    )
-
-    print(
-        f"Failed URLs: "
-        f"{len(failed)}"
-    )
-
-    print(
-        f"Final file: "
-        f"{FINAL_FILE}"
-    )
-
-    print(
-        "======================================"
-    )
+    parser.print_help()
 
 
 if __name__ == "__main__":
