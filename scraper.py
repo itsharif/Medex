@@ -605,42 +605,54 @@ def parse_medicine_page(url, html_text):
 
     name = get_h1(soup)
 
-if not name and title_parts:
-    name = remove_known_suffix_from_name(title_parts[0])
-else:
+    # H1 না পাওয়া গেলে title-এর প্রথম অংশ fallback
+    if not name and title_parts:
+        name = remove_known_suffix_from_name(title_parts[0])
+
     name = clean_text(name)
-    
+
     # -----------------------------------------------------
     # GENERIC
     # -----------------------------------------------------
 
     generic = find_generic(soup)
 
-    # Some MedEx pages expose generic as product-summary text.
-    # Use title / visible text only as fallback.
     if not generic:
         for part in title_parts:
-            if (
-                part
-                and part != name
-                and not looks_like_strength(part)
-                and not looks_like_company(part)
-                and part.lower() not in {
-                    x.lower() for x in DOSAGE_FORMS
-                }
-                and not looks_like_section_heading(part)
-                and len(part) < 200
-            ):
-                # Avoid Bengali title when English generic is available.
-                if re.search(r"[A-Za-z]", part):
-                    generic = part
-                    break
+            part = clean_text(part)
+
+            if not part:
+                continue
+
+            if part.lower() == name.lower():
+                continue
+
+            if looks_like_strength(part):
+                continue
+
+            if looks_like_company(part):
+                continue
+
+            if part.lower() in {
+                x.lower() for x in DOSAGE_FORMS
+            }:
+                continue
+
+            if looks_like_section_heading(part):
+                continue
+
+            if len(part) < 200 and re.search(r"[A-Za-z]", part):
+                generic = part
+                break
 
     # -----------------------------------------------------
     # STRENGTH
     # -----------------------------------------------------
 
-    strength = find_strength(soup, title_parts)
+    strength = find_strength(
+        soup,
+        title_parts
+    )
 
     # -----------------------------------------------------
     # DOSAGE
@@ -649,10 +661,10 @@ else:
     dosage = find_dosage_from_image(soup)
 
     if not dosage:
-        # Title normally contains:
-        # Brand | Strength | Dosage | ...
         for part in title_parts:
-            if part.lower() in {
+            part_lower = part.lower()
+
+            if part_lower in {
                 x.lower() for x in DOSAGE_FORMS
             }:
                 dosage = part
@@ -665,10 +677,13 @@ else:
     # COMPANY
     # -----------------------------------------------------
 
-    company = find_company(soup, title_parts)
+    company = find_company(
+        soup,
+        title_parts
+    )
 
     # -----------------------------------------------------
-    # REVIEW
+    # BUILD RECORD
     # -----------------------------------------------------
 
     record = {
@@ -683,21 +698,26 @@ else:
         "review_reasons": [],
     }
 
+    # -----------------------------------------------------
+    # VALIDATION
+    # -----------------------------------------------------
+
     reasons = validate_record(record)
 
-    record["needs_review"] = len(reasons) > 0
+    record["needs_review"] = bool(reasons)
     record["review_reasons"] = reasons
 
-    # Deterministic ID
-    identity = "|".join(
-        [
-            clean_text(name).lower(),
-            clean_text(generic).lower(),
-            clean_text(strength).lower(),
-            clean_text(dosage).lower(),
-            clean_text(company).lower(),
-        ]
-    )
+    # -----------------------------------------------------
+    # DETERMINISTIC ID
+    # -----------------------------------------------------
+
+    identity = "|".join([
+        clean_text(name).lower(),
+        clean_text(generic).lower(),
+        clean_text(strength).lower(),
+        clean_text(dosage).lower(),
+        clean_text(company).lower(),
+    ])
 
     record["id"] = hashlib.sha256(
         identity.encode("utf-8")
