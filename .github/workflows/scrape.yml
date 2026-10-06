@@ -1,0 +1,143 @@
+name: MedEx Scraper V3
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+
+  discover:
+    name: Discover MedEx URLs
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Discover URLs
+        run: |
+          python scraper.py discover
+
+      - name: Upload URL list
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-url-list
+          path: output/medex_urls.json
+          retention-days: 7
+
+
+  scrape:
+    name: Scrape Batch ${{ matrix.batch }}
+    needs: discover
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      max-parallel: 10
+
+      matrix:
+        batch: [
+          1,2,3,4,5,
+          6,7,8,9,10,
+          11,12,13,14,15,
+          16,17,18,19,20,
+          21,22,23,24,25,
+          26,27,28,29,30,
+          31,32,33,34,35,
+          36,37,38,39,40,
+          41,42,43,44,45,
+          46,47,48,49,50,
+          51,52,53,54,55
+        ]
+
+    timeout-minutes: 60
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download URL list
+        uses: actions/download-artifact@v5
+        with:
+          name: medex-url-list
+          path: output
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run batch
+        run: |
+          python scraper.py batch ${{ matrix.batch }}
+
+      - name: Upload batch result
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-${{ matrix.batch }}
+          path: |
+            output/batches/batch_*.json
+            output/batches/failed_*.json
+          retention-days: 7
+
+
+  merge:
+    name: Merge All Batches
+    needs: scrape
+
+    if: ${{ always() }}
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download all batch results
+        uses: actions/download-artifact@v5
+        with:
+          path: output/batches
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Merge results
+        run: |
+          python scraper.py merge
+
+      - name: Upload final JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-final-json
+          path: |
+            output/medex_medicines.json
+            output/medex_failed.json
+          retention-days: 30
