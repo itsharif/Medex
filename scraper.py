@@ -183,10 +183,24 @@ def extract_medicine_links(html_text):
     links = set()
 
     for a in soup.find_all("a", href=True):
-        href = a.get("href", "").strip()
+        href = clean_text(a.get("href", ""))
 
-        if re.match(r"^/brands/\d+/.+", href):
-            links.add(normalize_url(href))
+        if not href:
+            continue
+
+        # Convert relative URL to absolute URL
+        url = normalize_url(href)
+
+        if not url:
+            continue
+
+        # Get only the path portion
+        path = urlparse(url).path
+
+        # MedEx medicine URL pattern:
+        # /brands/13717/3-bion-100-mg-tablet
+        if re.match(r"^/brands/\d+/.+", path):
+            links.add(url)
 
     return links
 
@@ -591,12 +605,11 @@ def parse_medicine_page(url, html_text):
 
     name = get_h1(soup)
 
-    # Strong fallback: first title segment.
-    if not name and title_parts:
-        name = title_parts[0]
-
-    name = remove_known_suffix_from_name(name)
-
+if not name and title_parts:
+    name = remove_known_suffix_from_name(title_parts[0])
+else:
+    name = clean_text(name)
+    
     # -----------------------------------------------------
     # GENERIC
     # -----------------------------------------------------
