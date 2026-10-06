@@ -55,53 +55,67 @@ DOSAGE_FORMS = {
     "capsule",
     "soft gelatin capsule",
     "hard gelatin capsule",
+
     "syrup",
     "suspension",
     "solution",
     "oral solution",
     "oral suspension",
+
     "oral gel",
     "gel",
+
+    "shampoo",
+
     "cream",
     "ointment",
     "lotion",
+
     "powder",
+    "granules",
+
     "injection",
-    "injection solution",
     "infusion",
+
     "eye drop",
     "eye drops",
+
     "ear drop",
     "ear drops",
+
     "nasal drop",
     "nasal drops",
     "nasal spray",
+
     "spray",
-    "cream",
-    "ointment",
+
     "suppository",
     "pessary",
+
     "mouthwash",
     "mouth rinse",
+
     "inhaler",
     "respules",
     "nebules",
-    "dry powder inhaler",
-    "metered dose inhaler",
-    "topical solution",
-    "topical gel",
-    "oral powder",
-    "granules",
+
     "lozenge",
+
     "chewable tablet",
     "dispersible tablet",
     "effervescent tablet",
+
     "extended release tablet",
     "sustained release tablet",
     "modified release tablet",
     "enteric coated tablet",
     "film coated tablet",
     "controlled release tablet",
+
+    "topical solution",
+    "topical gel",
+    "oral powder",
+
     "vaginal cream",
     "vaginal tablet",
 }
@@ -502,32 +516,60 @@ def find_strength(soup, title_parts):
 
 def remove_known_suffix_from_name(name):
     """
-    Safety cleanup.
+    Remove repeated dosage-form / strength suffixes from
+    the medicine brand name.
 
-    This is NOT the primary name extraction.
-    It only protects against bad fallback values such as:
-
-    A-Migel Oral Gel
-    A-Migel Tablet
-    A-Migel 2% w/w
+    Examples:
+        A-Migel Oral Gel Oral Gel -> A-Migel
+        Nizoral Shampoo Shampoo   -> Nizoral
+        Mycon Cream Cream         -> Mycon
+        Arexel Tablet Tablet      -> Arexel
     """
 
     name = clean_text(name)
 
-    # Remove dosage forms at end.
-    for dosage in sorted(DOSAGE_FORMS, key=len, reverse=True):
-        pattern = r"\s+" + re.escape(dosage) + r"\s*$"
-        name = re.sub(pattern, "", name, flags=re.I)
+    if not name:
+        return ""
 
-    # Remove trailing strength.
+    # Remove dosage suffix repeatedly.
+    # Maximum 5 rounds prevents accidental infinite loops.
+    for _ in range(5):
+
+        old_name = name
+
+        for dosage in sorted(
+            DOSAGE_FORMS,
+            key=len,
+            reverse=True
+        ):
+            pattern = (
+                r"\s+"
+                + re.escape(dosage)
+                + r"\s*$"
+            )
+
+            name = re.sub(
+                pattern,
+                "",
+                name,
+                flags=re.I
+            ).strip()
+
+        if name == old_name:
+            break
+
+    # Remove trailing strength if present.
     strength_pattern = (
         r"\s+"
         r"(?:"
-        r"\d+(?:\.\d+)?\s*(?:mg|mcg|g|kg|iu|%)"
+        r"\d+(?:\.\d+)?\s*"
+        r"(?:mg|mcg|g|kg|iu|%)"
         r"(?:\s*(?:w/w|w/v|v/v))?"
         r"(?:\s*/\s*\d+\s*(?:ml|g|dose|vial))?"
         r"|"
-        r"\(\s*[^)]*(?:mg|mcg|g|iu|%)\s*[^)]*\)"
+        r"\(\s*[^)]*"
+        r"(?:mg|mcg|g|iu|%)"
+        r"[^)]*\)"
         r")"
         r"\s*$"
     )
@@ -536,8 +578,8 @@ def remove_known_suffix_from_name(name):
         strength_pattern,
         "",
         name,
-        flags=re.I,
-    )
+        flags=re.I
+    ).strip()
 
     return clean_text(name)
 
@@ -605,10 +647,9 @@ def parse_medicine_page(url, html_text):
 
     name = get_h1(soup)
 
-    # H1 না পাওয়া গেলে title-এর প্রথম অংশ fallback
-    if not name and title_parts:
-        name = remove_known_suffix_from_name(title_parts[0])
-
+if not name and title_parts:
+    name = clean_text(title_parts[0])
+else:
     name = clean_text(name)
 
     # -----------------------------------------------------
@@ -660,18 +701,21 @@ def parse_medicine_page(url, html_text):
 
     dosage = find_dosage_from_image(soup)
 
-    if not dosage:
-        for part in title_parts:
-            part_lower = part.lower()
+if not dosage:
+    for part in title_parts:
+        part_lower = part.lower()
 
-            if part_lower in {
-                x.lower() for x in DOSAGE_FORMS
-            }:
-                dosage = part
-                break
+        if part_lower in {
+            x.lower() for x in DOSAGE_FORMS
+        }:
+            dosage = part
+            break
 
-    if not dosage:
-        dosage = find_dosage_from_text(soup)
+if not dosage:
+    dosage = find_dosage_from_text(soup)
+
+    # Clean medicine name AFTER dosage is known.
+name = remove_known_suffix_from_name(name)
 
     # -----------------------------------------------------
     # COMPANY
