@@ -647,10 +647,10 @@ def parse_medicine_page(url, html_text):
 
     name = get_h1(soup)
 
-if not name and title_parts:
-    name = clean_text(title_parts[0])
-else:
-    name = clean_text(name)
+    if not name and title_parts:
+        name = clean_text(title_parts[0])
+    else:
+        name = clean_text(name)
 
     # -----------------------------------------------------
     # GENERIC
@@ -701,21 +701,33 @@ else:
 
     dosage = find_dosage_from_image(soup)
 
-if not dosage:
-    for part in title_parts:
-        part_lower = part.lower()
-
-        if part_lower in {
+    if not dosage:
+        dosage_forms_lower = {
             x.lower() for x in DOSAGE_FORMS
-        }:
-            dosage = part
-            break
+        }
 
-if not dosage:
-    dosage = find_dosage_from_text(soup)
+        for part in title_parts:
+            part_clean = clean_text(part)
 
-    # Clean medicine name AFTER dosage is known.
-name = remove_known_suffix_from_name(name)
+            if part_clean.lower() in dosage_forms_lower:
+                dosage = part_clean
+                break
+
+    if not dosage:
+        dosage = find_dosage_from_text(soup)
+
+    # -----------------------------------------------------
+    # CLEAN MEDICINE NAME
+    # -----------------------------------------------------
+    #
+    # Examples:
+    # A-Migel Oral Gel Oral Gel -> A-Migel
+    # Nizoral Shampoo Shampoo   -> Nizoral
+    # Fungidal Cream Cream      -> Fungidal
+    # Arexel Tablet Tablet      -> Arexel
+    #
+
+    name = remove_known_suffix_from_name(name)
 
     # -----------------------------------------------------
     # COMPANY
@@ -768,7 +780,6 @@ name = remove_known_suffix_from_name(name)
     ).hexdigest()[:24]
 
     return record
-
 
 # ---------------------------------------------------------
 # BATCH SCRAPING
