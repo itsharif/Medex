@@ -1,0 +1,260 @@
+name: MedEx Scraper V4
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+
+  # =====================================================
+  # 1. DISCOVER ALL MEDICINE URLS
+  # =====================================================
+
+  discover:
+    name: Discover MedEx URLs
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Discover medicine URLs
+        run: |
+          python scraper.py --discover
+
+      - name: Show URL count
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("medex_urls.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          print("Total medicine URLs:", data["total"])
+          PY
+
+      - name: Upload URL list
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-url-list
+          path: medex_urls.json
+          retention-days: 7
+
+
+  # =====================================================
+  # 2. SCRAPE BATCHES
+  # =====================================================
+
+  scrape:
+    name: Scrape Batch ${{ matrix.batch }}
+    needs: discover
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+
+      # Do NOT start all 52 batches simultaneously.
+      # 10 concurrent batches is safer for MedEx.
+      max-parallel: 10
+
+      matrix:
+        batch:
+          - 1
+          - 2
+          - 3
+          - 4
+          - 5
+          - 6
+          - 7
+          - 8
+          - 9
+          - 10
+          - 11
+          - 12
+          - 13
+          - 14
+          - 15
+          - 16
+          - 17
+          - 18
+          - 19
+          - 20
+          - 21
+          - 22
+          - 23
+          - 24
+          - 25
+          - 26
+          - 27
+          - 28
+          - 29
+          - 30
+          - 31
+          - 32
+          - 33
+          - 34
+          - 35
+          - 36
+          - 37
+          - 38
+          - 39
+          - 40
+          - 41
+          - 42
+          - 43
+          - 44
+          - 45
+          - 46
+          - 47
+          - 48
+          - 49
+          - 50
+          - 51
+          - 52
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download URL list
+        uses: actions/download-artifact@v4
+        with:
+          name: medex-url-list
+          path: .
+
+      - name: Show batch information
+        run: |
+          echo "Running Batch ${{ matrix.batch }}"
+
+          python - <<'PY'
+          import json
+
+          with open("medex_urls.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          total = data["total"]
+          batch = ${{ matrix.batch }}
+
+          start = (batch - 1) * 500 + 1
+          end = min(batch * 500, total)
+
+          print("Total URLs :", total)
+          print("Batch      :", batch)
+          print("Range      :", start, "-", end)
+          PY
+
+      - name: Scrape batch
+        run: |
+          python scraper.py \
+            --urls-file medex_urls.json \
+            --batch ${{ matrix.batch }} \
+            --output-dir output/batches
+
+      - name: Upload batch result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-batch-${{ matrix.batch }}
+          path: output/batches/batch_*.json
+          retention-days: 14
+          if-no-files-found: ignore
+
+
+  # =====================================================
+  # 3. MERGE ALL BATCHES
+  # =====================================================
+
+  merge:
+    name: Merge All Batches
+    needs: scrape
+
+    if: always()
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Download all batch artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: medex-batch-*
+          path: output/batches
+          merge-multiple: true
+
+      - name: Show batch files
+        run: |
+          find output/batches -type f -maxdepth 2 -print
+
+      - name: Merge JSON
+        run: |
+          python scraper.py \
+            --merge \
+            --batch-dir output/batches \
+            --output-file output/medex_medicines.json
+
+      - name: Show final statistics
+        run: |
+          python - <<'PY'
+          import json
+
+          path = "output/medex_medicines.json"
+
+          with open(path, "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          print()
+          print("=" * 60)
+          print("FINAL MEDEx DATA")
+          print("=" * 60)
+          print("Total records :", data["total_records"])
+          print("Failed URLs   :", data["total_failed"])
+          print("Duplicates    :", data["duplicate_records_removed"])
+          print("Needs review  :", data["records_needing_review"])
+          print("=" * 60)
+          PY
+
+      - name: Upload final JSON
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-final-json
+          path: output/medex_medicines.json
+          retention-days: 30
+
+      - name: Upload failed URLs
+        uses: actions/upload-artifact@v4
+        with:
+          name: medex-failed-urls
+          path: output/medex_medicines.json
+          retention-days: 30
