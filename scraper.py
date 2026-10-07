@@ -121,6 +121,34 @@ DOSAGE_FORMS = {
 }
 
 
+# Route / dosage-form words that MedEx sometimes appends to the
+# brand name (e.g. "A-Migel Oral", "Ceftron IV Injection",
+# "Napa Paediatric Drops"). Any run of these words at the END of a
+# name is stripped, as long as at least one word of the brand remains.
+NAME_SUFFIX_WORDS = {
+    # routes of administration
+    "oral", "iv", "im", "sc", "i.v.", "i.m.", "s.c.",
+    "iv/im", "im/iv", "iv/sc", "sc/iv", "im/sc",
+    "intravenous", "intramuscular", "subcutaneous",
+    "topical", "vaginal", "rectal", "nasal", "ophthalmic", "otic",
+    "eye", "ear", "eye/ear", "sublingual", "inhalation",
+
+    # dosage forms
+    "tablet", "tablets", "capsule", "capsules",
+    "syrup", "suspension", "solution", "emulsion", "elixir",
+    "gel", "cream", "ointment", "lotion", "paste",
+    "shampoo", "powder", "granules", "sachet",
+    "injection", "infusion",
+    "drop", "drops", "spray", "suppository", "suppositories",
+    "pessary", "mouthwash", "inhaler", "respules", "nebules",
+    "lozenge", "lozenges", "patch", "liniment",
+
+    # qualifiers that only appear together with a form
+    "paediatric", "pediatric", "dispersible", "chewable",
+    "effervescent",
+}
+
+
 def clean_text(value):
     if not value:
         return ""
@@ -311,6 +339,19 @@ def get_h1(soup):
     candidates = []
 
     for h1 in soup.find_all("h1"):
+        # MedEx renders the dosage form as a subtitle inside the
+        # heading, e.g. <h1>A-Migel Oral <small>Oral Gel</small></h1>.
+        # Drop those subtitle tags so only the brand text remains.
+        h1 = BeautifulSoup(str(h1), "html.parser")
+
+        for tag in h1.find_all(["small", "sub", "sup"]):
+            tag.decompose()
+
+        for tag in h1.find_all(
+            class_=re.compile(r"subtitle|dosage|form", re.I)
+        ):
+            tag.decompose()
+
         text = clean_text(h1.get_text(" ", strip=True))
 
         if text:
@@ -514,16 +555,59 @@ def find_strength(soup, title_parts):
     return ""
 
 
-def remove_known_suffix_from_name(name):
+STRENGTH_SUFFIX_PATTERN = (
+    r"\s+"
+    r"(?:"
+    r"\d+(?:\.\d+)?\s*"
+    r"(?:mg|mcg|g|kg|iu|ml|%)"
+    r"(?:\s*(?:w/w|w/v|v/v))?"
+    r"(?:\s*/\s*\d*(?:\.\d+)?\s*(?:ml|g|dose|vial|tablet|capsule))?"
+    r"|"
+    r"\(\s*[^)]*"
+    r"(?:mg|mcg|g|iu|ml|%)"
+    r"[^)]*\)"
+    r")"
+    r"\s*$"
+)
+
+
+def strip_name_suffix_words(name):
     """
-    Remove repeated dosage-form / strength suffixes from
+    Remove any trailing run of route / dosage-form words.
+
+    "A-Migel Oral"          -> "A-Migel"
+    "Ceftron IV Injection"  -> "Ceftron"
+    "Napa Paediatric Drops" -> "Napa"
+
+    The first word is never removed, so a brand is never emptied.
+    """
+
+    words = name.split()
+
+    while len(words) > 1:
+        last = words[-1].lower().strip(" ,;:-()[]")
+
+        if last in NAME_SUFFIX_WORDS or not last:
+            words.pop()
+            continue
+
+        break
+
+    return " ".join(words)
+
+
+def remove_known_suffix_from_name(name, dosage=""):
+    """
+    Remove dosage-form / route / strength suffixes from
     the medicine brand name.
 
     Examples:
         A-Migel Oral Gel Oral Gel -> A-Migel
+        A-Migel Oral              -> A-Migel
+        Ceftron IV Injection      -> Ceftron
         Nizoral Shampoo Shampoo   -> Nizoral
         Mycon Cream Cream         -> Mycon
-        Arexel Tablet Tablet      -> Arexel
+        Arexel Tablet 50 mg       -> Arexel
     """
 
     name = clean_text(name)
@@ -531,57 +615,59 @@ def remove_known_suffix_from_name(name):
     if not name:
         return ""
 
-    # Remove dosage suffix repeatedly.
-    # Maximum 5 rounds prevents accidental infinite loops.
-    for _ in range(5):
+    known_forms = set(DOSAGE_FORMS)
+
+    if dosage:
+        known_forms.add(clean_text(dosage).lower())
+
+    known_forms = sorted(known_forms, key=len, reverse=True)
+
+    # Maximum 10 rounds prevents accidental infinite loops.
+    for _ in range(10):
 
         old_name = name
 
-        for dosage in sorted(
-            DOSAGE_FORMS,
-            key=len,
-            reverse=True
-        ):
-            pattern = (
-                r"\s+"
-                + re.escape(dosage)
-                + r"\s*$"
-            )
-
-            name = re.sub(
-                pattern,
+        # Full dosage-form phrases (longest first).
+        for form in known_forms:
+            candidate = re.sub(
+                r"\s+" + re.escape(form) + r"\s*$",
                 "",
                 name,
-                flags=re.I
+                flags=re.I,
             ).strip()
+
+            if candidate:
+                name = candidate
+
+        # Trailing strength such as "500 mg", "2% w/w", "(250 mg/5 ml)".
+        candidate = re.sub(
+            STRENGTH_SUFFIX_PATTERN,
+            "",
+            name,
+            flags=re.I,
+        ).strip()
+
+        if candidate:
+            name = candidate
+
+        # Leftover route words such as "Oral", "IV", "IM".
+        name = strip_name_suffix_words(name)
+
+        name = clean_text(name.rstrip(" ,;:-/"))
 
         if name == old_name:
             break
 
-    # Remove trailing strength if present.
-    strength_pattern = (
-        r"\s+"
-        r"(?:"
-        r"\d+(?:\.\d+)?\s*"
-        r"(?:mg|mcg|g|kg|iu|%)"
-        r"(?:\s*(?:w/w|w/v|v/v))?"
-        r"(?:\s*/\s*\d+\s*(?:ml|g|dose|vial))?"
-        r"|"
-        r"\(\s*[^)]*"
-        r"(?:mg|mcg|g|iu|%)"
-        r"[^)]*\)"
-        r")"
-        r"\s*$"
-    )
-
-    name = re.sub(
-        strength_pattern,
-        "",
-        name,
-        flags=re.I
-    ).strip()
-
     return clean_text(name)
+
+
+def name_has_suffix_word(name):
+    words = clean_text(name).split()
+
+    if len(words) < 2:
+        return False
+
+    return words[-1].lower().strip(" ,;:-()[]") in NAME_SUFFIX_WORDS
 
 
 def validate_record(record):
@@ -610,6 +696,13 @@ def validate_record(record):
             re.I,
         ):
             reasons.append("name_contains_dosage")
+            break
+
+    if (
+        "name_contains_dosage" not in reasons
+        and name_has_suffix_word(name)
+    ):
+        reasons.append("name_contains_dosage")
 
     if generic and looks_like_section_heading(generic):
         reasons.append("generic_is_section_heading")
@@ -727,7 +820,7 @@ def parse_medicine_page(url, html_text):
     # Arexel Tablet Tablet      -> Arexel
     #
 
-    name = remove_known_suffix_from_name(name)
+    name = remove_known_suffix_from_name(name, dosage)
 
     # -----------------------------------------------------
     # COMPANY
