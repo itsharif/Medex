@@ -76,6 +76,12 @@ DOSAGE_FORMS = {
 
     "injection",
     "infusion",
+    "iv injection",
+    "im injection",
+    "iv/im injection",
+    "im/iv injection",
+    "sc injection",
+    "iv infusion",
 
     "eye drop",
     "eye drops",
@@ -118,6 +124,27 @@ DOSAGE_FORMS = {
 
     "vaginal cream",
     "vaginal tablet",
+
+    "liquid",
+    "emulsion",
+    "hand rub",
+    "nail lacquer",
+    "oral paste",
+    "drop",
+    "drops",
+    "pediatric drop",
+    "pediatric drops",
+    "paediatric drop",
+    "paediatric drops",
+}
+
+
+# Dosage values that should be stored under a different, simpler name.
+DOSAGE_ALIASES = {
+    "pediatric drop": "Drop",
+    "pediatric drops": "Drop",
+    "paediatric drop": "Drop",
+    "paediatric drops": "Drop",
 }
 
 
@@ -136,7 +163,7 @@ NAME_SUFFIX_WORDS = {
     # dosage forms
     "tablet", "tablets", "capsule", "capsules",
     "syrup", "suspension", "solution", "emulsion", "elixir",
-    "gel", "cream", "ointment", "lotion", "paste",
+    "gel", "cream", "ointment", "lotion", "paste", "liquid", "lacquer",
     "shampoo", "powder", "granules", "sachet",
     "injection", "infusion",
     "drop", "drops", "spray", "suppository", "suppositories",
@@ -410,6 +437,8 @@ def looks_like_strength(value):
         r"\d+\s*mg\b",
         r"\d+\s*mcg\b",
         r"\d+\s*g\b",
+        r"\d+\s*gm\b",
+        r"\d+\s*ml\b",
         r"\d+\s*kg\b",
         r"\d+\s*iu\b",
         r"\d+\s*%\s*(w/w|w/v|v/v)?",
@@ -538,8 +567,15 @@ def find_company(soup, title_parts):
 
 def find_strength(soup, title_parts):
     """
-    Prefer title second part when it looks like strength.
+    Strength / concentration printed under the brand name,
+    e.g. "4.8% w/v", "500 mg", "3.35 gm/5 ml".
     """
+
+    for tag in soup.find_all(attrs={"title": re.compile(r"^\s*strength\s*$", re.I)}):
+        text = clean_text(tag.get_text(" ", strip=True))
+
+        if text and len(text) <= 100:
+            return text
 
     for part in title_parts:
         if looks_like_strength(part):
@@ -553,6 +589,101 @@ def find_strength(soup, title_parts):
             return text
 
     return ""
+
+
+PACK_QUANTITY_PATTERN = re.compile(
+    r"(\d+(?:\.\d+)?)\s*"
+    r"(ml|ltr|litre|liter|litter|l|gm|g|mg|mcg|kg)\b",
+    re.I,
+)
+
+PACK_PRICE_PATTERN = re.compile(
+    r"([^:\n৳]{1,80}?)\s*:\s*৳\s*([\d,]+(?:\.\d+)?)"
+)
+
+UNIT_NAMES = {
+    "ltr": "litre",
+    "liter": "litre",
+    "litter": "litre",
+    "l": "litre",
+}
+
+
+def normalize_quantity(value):
+    """
+    "100ml" -> "100 ml", "5 Litter" -> "5 litre"
+    """
+
+    match = PACK_QUANTITY_PATTERN.search(value or "")
+
+    if not match:
+        return ""
+
+    number, unit = match.group(1), match.group(2).lower()
+    unit = UNIT_NAMES.get(unit, unit)
+
+    return f"{number} {unit}"
+
+
+def find_pack_sizes(soup):
+    """
+    Read the price list printed under each product, e.g.
+
+        50 ml bottle: ৳ 45.00
+        100 ml bottle: ৳ 60.00
+        5 litter container: ৳ 1,500.00
+
+    and return [{"strength": "50 ml", "price": "45.00"}, ...].
+
+    Lines without a quantity (e.g. "Unit Price: ৳ 1.20" for tablets)
+    are ignored. Repeated sizes are kept only once.
+    """
+
+    text = soup.get_text("\n", strip=True)
+    packs = []
+    seen = set()
+
+    for label, price in PACK_PRICE_PATTERN.findall(text):
+        quantity = normalize_quantity(label)
+
+        if not quantity or quantity in seen:
+            continue
+
+        seen.add(quantity)
+        packs.append({
+            "strength": quantity,
+            "price": price.replace(",", ""),
+        })
+
+    return packs
+
+
+def same_strength(concentration, pack_strength):
+    """
+    True when the strength under the name and the pack size
+    describe the same thing, e.g. "500 mg/vial" and "500 mg".
+    """
+
+    if not concentration or not pack_strength:
+        return False
+
+    conc = re.sub(
+        r"\s*/\s*(vial|ampoule|ampule|bottle|sachet|tube|pack)\b",
+        "",
+        clean_text(concentration),
+        flags=re.I,
+    )
+
+    if "/" in conc:
+        return False
+
+    return normalize_quantity(conc) == pack_strength and bool(
+        re.fullmatch(
+            r"\s*\d+(?:\.\d+)?\s*[a-z]+\s*",
+            conc,
+            re.I,
+        )
+    )
 
 
 STRENGTH_SUFFIX_PATTERN = (
@@ -809,6 +940,8 @@ def parse_medicine_page(url, html_text):
     if not dosage:
         dosage = find_dosage_from_text(soup)
 
+    dosage = DOSAGE_ALIASES.get(dosage.lower(), dosage)
+
     # -----------------------------------------------------
     # CLEAN MEDICINE NAME
     # -----------------------------------------------------
@@ -832,9 +965,52 @@ def parse_medicine_page(url, html_text):
     )
 
     # -----------------------------------------------------
-    # BUILD RECORD
+    # PACK SIZES
     # -----------------------------------------------------
+    #
+    # Every pack in the price list becomes its own record.
+    # Its size is the strength; the concentration printed
+    # under the name (e.g. "4.8% w/v") moves into the name:
+    #
+    #   Dettol | 4.8% w/v | 50 ml bottle: ৳ 45
+    #   -> name "Dettol 4.8% w/v", strength "50 ml"
+    #
+    # When both are the same, only the strength is kept.
+    #
 
+    packs = find_pack_sizes(soup) or [
+        {"strength": strength, "price": ""}
+    ]
+
+    records = []
+
+    for pack in packs:
+        pack_strength = pack["strength"]
+        record_name = name
+
+        if (
+            strength
+            and pack_strength != strength
+            and not same_strength(strength, pack_strength)
+        ):
+            record_name = clean_text(f"{name} {strength}")
+
+        records.append(
+            build_record(
+                url,
+                record_name,
+                generic,
+                pack_strength,
+                dosage,
+                company,
+                pack["price"],
+            )
+        )
+
+    return records
+
+
+def build_record(url, name, generic, strength, dosage, company, price=""):
     record = {
         "id": "",
         "name": name,
@@ -842,24 +1018,18 @@ def parse_medicine_page(url, html_text):
         "strength": strength,
         "dosage": dosage,
         "company": company,
+        "price": price,
         "source_url": url,
         "needs_review": False,
         "review_reasons": [],
     }
-
-    # -----------------------------------------------------
-    # VALIDATION
-    # -----------------------------------------------------
 
     reasons = validate_record(record)
 
     record["needs_review"] = bool(reasons)
     record["review_reasons"] = reasons
 
-    # -----------------------------------------------------
-    # DETERMINISTIC ID
-    # -----------------------------------------------------
-
+    # Deterministic ID
     identity = "|".join([
         clean_text(name).lower(),
         clean_text(generic).lower(),
@@ -940,32 +1110,39 @@ def scrape_batch(urls, batch_number, output_dir):
             continue
 
         try:
-            record = parse_medicine_page(
+            page_records = parse_medicine_page(
                 url,
                 html_text,
             )
 
-            records.append(record)
+            records.extend(page_records)
 
-            status = "REVIEW" if record["needs_review"] else "OK"
+            for n, record in enumerate(page_records):
+                status = "REVIEW" if record["needs_review"] else "OK"
 
-            print(
-                f"[{status}] {record['name']}"
-            )
+                prefix = "" if n == 0 else " " * (len(str(index)) + len(str(len(batch_urls))) + 4)
 
-            if index <= 15:
                 print(
-                    f"       Strength : {record['strength']}"
+                    f"{prefix}[{status}] {record['name']}"
                 )
-                print(
-                    f"       Generic  : {record['generic_name']}"
-                )
-                print(
-                    f"       Dosage   : {record['dosage']}"
-                )
-                print(
-                    f"       Company  : {record['company']}"
-                )
+
+                if index <= 15:
+                    print(
+                        f"       Strength : {record['strength']}"
+                    )
+                    print(
+                        f"       Generic  : {record['generic_name']}"
+                    )
+                    print(
+                        f"       Dosage   : {record['dosage']}"
+                    )
+                    print(
+                        f"       Company  : {record['company']}"
+                    )
+                    if record["price"]:
+                        print(
+                            f"       Price    : {record['price']}"
+                        )
 
         except Exception as exc:
             print(f"[PARSE ERROR] {exc}")
@@ -976,7 +1153,8 @@ def scrape_batch(urls, batch_number, output_dir):
     batch_data = {
         "batch": batch_number,
         "total_urls": len(batch_urls),
-        "success": len(records),
+        "success": len(batch_urls) - len(failed),
+        "total_records": len(records),
         "failed": len(failed),
         "failed_urls": failed,
         "records": records,

@@ -110,6 +110,7 @@
     ["strength", "Strength"],
     ["dosage", "Dosage"],
     ["company", "কোম্পানি", true],
+    ["price", "দাম (৳)"],
   ];
   const FIELD_REASONS = {
     name: ["missing_name", "name_too_long", "name_is_section_heading", "name_contains_dosage"],
@@ -117,6 +118,7 @@
     strength: ["missing_strength"],
     dosage: ["missing_dosage"],
     company: ["missing_company", "company_is_section_heading"],
+    price: [],
   };
   const REASON_LABELS = {
     missing_name: "নাম নেই",
@@ -135,7 +137,7 @@
     "oral iv im sc i.v. i.m. s.c. iv/im im/iv iv/sc sc/iv im/sc intravenous intramuscular " +
     "subcutaneous topical vaginal rectal nasal ophthalmic otic eye ear eye/ear sublingual " +
     "inhalation tablet tablets capsule capsules syrup suspension solution emulsion elixir gel " +
-    "cream ointment lotion paste shampoo powder granules sachet injection infusion drop drops " +
+    "cream ointment lotion paste liquid lacquer shampoo powder granules sachet injection infusion drop drops " +
     "spray suppository suppositories pessary mouthwash inhaler respules nebules lozenge " +
     "lozenges patch liniment paediatric pediatric dispersible chewable effervescent"
   ).split(" "));
