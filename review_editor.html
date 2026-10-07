@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="bn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MedEx Review Editor</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1d2330; --muted: #6b7280;
+    --border: #dfe3ea; --accent: #2563eb; --ok: #15803d; --warn: #b45309;
+    --danger: #b91c1c; --chip: #fef3c7; --chip-text: #92400e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a; --card: #1a1f28; --text: #e5e7eb; --muted: #9ca3af;
+      --border: #2d3442; --accent: #60a5fa; --ok: #4ade80; --warn: #fbbf24;
+      --danger: #f87171; --chip: #3b2f12; --chip-text: #fcd34d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", "Noto Sans Bengali", sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 5; background: var(--card);
+    border-bottom: 1px solid var(--border); padding: 10px 16px;
+  }
+  h1 { font-size: 17px; margin: 0 0 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .row > * { flex: 0 0 auto; }
+  input, select, button {
+    font: inherit; color: inherit; background: var(--card);
+    border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+  }
+  input[type=search] { flex: 1 1 180px; min-width: 0; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.ok { color: var(--ok); border-color: var(--ok); }
+  button.danger { color: var(--danger); border-color: var(--danger); }
+  button:disabled { opacity: .45; cursor: default; }
+  .stats { font-size: 13px; color: var(--muted); margin-top: 6px; }
+  .stats b { color: var(--text); }
+  main { max-width: 960px; margin: 0 auto; padding: 12px 16px 80px; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 10px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px; margin-bottom: 12px;
+  }
+  .card.done { border-color: var(--ok); }
+  .card-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+  .idx { font-size: 12px; color: var(--muted); }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 8px; }
+  .chip {
+    font-size: 11.5px; background: var(--chip); color: var(--chip-text);
+    border-radius: 999px; padding: 2px 8px;
+  }
+  .chip.okc { background: transparent; color: var(--ok); border: 1px solid var(--ok); }
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .fields label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+  .fields label.wide { grid-column: 1 / -1; }
+  .fields input { width: 100%; color: var(--text); }
+  .fields input.bad { border-color: var(--warn); }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+  .actions a { font-size: 13px; color: var(--accent); margin-left: auto; word-break: break-all; }
+  .pager { display: flex; justify-content: center; align-items: center; gap: 10px; margin: 16px 0; }
+  .toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px;
+    font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+  @media (max-width: 520px) {
+    .fields { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>MedEx Review Editor</h1>
+  <div class="row">
+    <input type="file" id="file" accept=".json,application/json">
+    <button class="primary" id="download" disabled>⬇ ডাউনলোড</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <input type="search" id="search" placeholder="নাম / জেনেরিক / কোম্পানি খুঁজুন">
+    <select id="show">
+      <option value="review">শুধু review বাকি</option>
+      <option value="all">সব ওষুধ</option>
+      <option value="done">ঠিক করা হয়েছে</option>
+    </select>
+    <select id="reason"><option value="">সব কারণ</option></select>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <button class="ok" id="bulkOk" disabled>✔ এই পেজের সব OK</button>
+    <button id="autoClean" disabled title="নামের শেষে Oral, IV, Injection ইত্যাদি থাকলে মুছে দেয়">🧹 নাম অটো-ক্লিন</button>
+  </div>
+  <div class="stats" id="stats">একটা JSON ফাইল সিলেক্ট করুন (merged ফাইল বা batch ফাইল)।</div>
+</header>
+
+<main id="list"><div class="empty">কোনো ফাইল লোড করা হয়নি</div></main>
+<div class="toast" id="toast"></div>
+
+<script>
+(() => {
+  const PAGE_SIZE = 40;
+  const FIELDS = [
+    ["name", "নাম (Brand)", true],
+    ["generic_name", "জেনেরিক", true],
+    ["strength", "Strength"],
+    ["dosage", "Dosage"],
+    ["company", "কোম্পানি", true],
+  ];
+  const FIELD_REASONS = {
+    name: ["missing_name", "name_too_long", "name_is_section_heading", "name_contains_dosage"],
+    generic_name: ["missing_generic", "generic_is_section_heading"],
+    strength: ["missing_strength"],
+    dosage: ["missing_dosage"],
+    company: ["missing_company", "company_is_section_heading"],
+  };
+  const REASON_LABELS = {
+    missing_name: "নাম নেই",
+    name_too_long: "নাম অনেক লম্বা",
+    name_is_section_heading: "নাম ভুল (হেডিং)",
+    name_contains_dosage: "নামে dosage/route আছে",
+    generic_is_section_heading: "জেনেরিক ভুল (হেডিং)",
+    missing_generic: "জেনেরিক নেই",
+    missing_strength: "Strength নেই",
+    missing_dosage: "Dosage নেই",
+    missing_company: "কোম্পানি নেই",
+    company_is_section_heading: "কোম্পানি ভুল (হেডিং)",
+  };
+  // Same idea as NAME_SUFFIX_WORDS in scraper.py
+  const SUFFIX_WORDS = new Set((
+    "oral iv im sc i.v. i.m. s.c. iv/im im/iv iv/sc sc/iv im/sc intravenous intramuscular " +
+    "subcutaneous topical vaginal rectal nasal ophthalmic otic eye ear eye/ear sublingual " +
+    "inhalation tablet tablets capsule capsules syrup suspension solution emulsion elixir gel " +
+    "cream ointment lotion paste shampoo powder granules sachet injection infusion drop drops " +
+    "spray suppository suppositories pessary mouthwash inhaler respules nebules lozenge " +
+    "lozenges patch liniment paediatric pediatric dispersible chewable effervescent"
+  ).split(" "));
+  const HEADINGS = new Set([
+    "indications", "pharmacology", "dosage", "administration", "interaction",
+    "contraindications", "side effects", "pregnancy & lactation", "precautions & warnings",
+    "overdose effects", "therapeutic class", "storage conditions", "pack size & price",
+  ]);
+  const STORAGE_KEY = "medex-review-editor-v1";
+
+  const $ = id => document.getElementById(id);
+  let doc = null;        // the original JSON (object or array)
+  let records = [];      // reference to the records array inside doc
+  let fileName = "medicines.json";
+  let page = 0;
+  let edited = new Set(); // record indexes the user touched
+
+  const clean = v => String(v ?? "").replace(/\s+/g, " ").trim();
+  const lastWord = name => {
+    const w = clean(name).split(" ");
+    return w.length > 1 ? w[w.length - 1].toLowerCase().replace(/^[\s,;:\-()[\]]+|[\s,;:\-()[\]]+$/g, "") : "";
+  };
+
+  function stripSuffix(name) {
+    const w = clean(name).split(" ");
+    while (w.length > 1) {
+      const last = w[w.length - 1].toLowerCase().replace(/^[\s,;:\-()[\]]+|[\s,;:\-()[\]]+$/g, "");
+      if (!last || SUFFIX_WORDS.has(last)) { w.pop(); continue; }
+      break;
+    }
+    return w.join(" ").replace(/[\s,;:\-/]+$/, "");
+  }
+
+  function validate(r) {
+    const reasons = [];
+    const name = clean(r.name);
+    if (!name) reasons.push("missing_name");
+    if (name.length > 150) reasons.push("name_too_long");
+    if (name && HEADINGS.has(name.toLowerCase())) reasons.push("name_is_section_heading");
+    if (SUFFIX_WORDS.has(lastWord(name))) reasons.push("name_contains_dosage");
+    const generic = clean(r.generic_name);
+    if (generic && HEADINGS.has(generic.toLowerCase())) reasons.push("generic_is_section_heading");
+    if (!generic) reasons.push("missing_generic");
+    if (!clean(r.strength)) reasons.push("missing_strength");
+    if (!clean(r.dosage)) reasons.push("missing_dosage");
+    const company = clean(r.company);
+    if (!company) reasons.push("missing_company");
+    if (company && HEADINGS.has(company.toLowerCase())) reasons.push("company_is_section_heading");
+    return reasons;
+  }
+
+  function toast(msg) {
+    const t = $("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    clearTimeout(t._h);
+    t._h = setTimeout(() => t.classList.remove("show"), 1800);
+  }
+
+  function save() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ fileName, doc, edited: [...edited] }));
+    } catch (e) { /* storage full or blocked; editing still works */ }
+  }
+
+  function load(json, name, editedList) {
+    if (Array.isArray(json)) { records = json; }
+    else if (json && Array.isArray(json.records)) { records = json.records; }
+    else { alert("এই ফাইলে records পাওয়া যায়নি।"); return; }
+    doc = json;
+    fileName = name || fileName;
+    edited = new Set(editedList || []);
+    records.forEach(r => {
+      if (!Array.isArray(r.review_reasons)) r.review_reasons = [];
+      if (typeof r.needs_review !== "boolean") r.needs_review = r.review_reasons.length > 0;
+    });
+    page = 0;
+    ["download", "bulkOk", "autoClean"].forEach(id => $(id).disabled = false);
+    buildReasonFilter();
+    render();
+  }
+
+  function buildReasonFilter() {
+    const counts = {};
+    records.forEach(r => { if (r.needs_review) r.review_reasons.forEach(x => counts[x] = (counts[x] || 0) + 1); });
+    const sel = $("reason");
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">সব কারণ</option>' + Object.keys(counts).sort()
+      .map(k => `<option value="${k}">${REASON_LABELS[k] || k} (${counts[k]})</option>`).join("");
+    sel.value = counts[cur] ? cur : "";
+  }
+
+  function filtered() {
+    const q = clean($("search").value).toLowerCase();
+    const show = $("show").value;
+    const reason = $("reason").value;
+    const out = [];
+    records.forEach((r, i) => {
+      if (show === "review" && !r.needs_review) return;
+      if (show === "done" && !(edited.has(i) && !r.needs_review)) return;
+      if (reason && !r.review_reasons.includes(reason)) return;
+      if (q && ![r.name, r.generic_name, r.company, r.strength, r.dosage]
+        .some(v => clean(v).toLowerCase().includes(q))) return;
+      out.push(i);
+    });
+    return out;
+  }
+
+  function esc(s) {
+    return clean(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/"/g, "&quot;");
+  }
+
+  function cardHtml(i) {
+    const r = records[i];
+    const live = validate(r);
+    const chips = r.needs_review
+      ? r.review_reasons.map(x => `<span class="chip">${REASON_LABELS[x] || x}</span>`).join("")
+      : '<span class="chip okc">✔ OK</span>';
+    const fields = FIELDS.map(([key, label, wide]) => {
+      const bad = live.some(x => FIELD_REASONS[key].includes(x));
+      return `<label class="${wide ? "wide" : ""}">${label}
+        <input data-i="${i}" data-k="${key}" value="${esc(r[key])}" class="${bad ? "bad" : ""}"></label>`;
+    }).join("");
+    return `<div class="card ${r.needs_review ? "" : "done"}" id="c${i}">
+      <div class="card-head"><span class="idx">#${i + 1}</span></div>
+      <div class="chips">${chips}</div>
+      <div class="fields">${fields}</div>
+      <div class="actions">
+        <button class="ok" data-act="ok" data-i="${i}">✔ OK</button>
+        <button data-act="recheck" data-i="${i}">↻ আবার চেক</button>
+        <button class="danger" data-act="del" data-i="${i}">🗑 মুছুন</button>
+        ${r.source_url ? `<a href="${esc(r.source_url)}" target="_blank" rel="noopener">MedEx পেজ ↗</a>` : ""}
+      </div>
+    </div>`;
+  }
+
+  function render() {
+    const idx = filtered();
+    const pages = Math.max(1, Math.ceil(idx.length / PAGE_SIZE));
+    if (page >= pages) page = pages - 1;
+    const slice = idx.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    updateStats();
+    const pager = idx.length > PAGE_SIZE ? `<div class="pager">
+      <button data-act="prev" ${page === 0 ? "disabled" : ""}>◀ আগের</button>
+      <span>${page + 1} / ${pages}</span>
+      <button data-act="next" ${page >= pages - 1 ? "disabled" : ""}>পরের ▶</button></div>` : "";
+    $("list").innerHTML = slice.length
+      ? pager + slice.map(cardHtml).join("") + pager
+      : '<div class="empty">এই ফিল্টারে কিছু নেই 🎉</div>';
+  }
+
+  function refreshCard(i) {
+    const el = $("c" + i);
+    if (el) el.outerHTML = cardHtml(i);
+  }
+
+  function markOk(i) {
+    records[i].needs_review = false;
+    records[i].review_reasons = [];
+    edited.add(i);
+  }
+
+  function recheck(i) {
+    const reasons = validate(records[i]);
+    records[i].review_reasons = reasons;
+    records[i].needs_review = reasons.length > 0;
+    edited.add(i);
+  }
+
+  // --- events ---------------------------------------------------------------
+
+  $("file").addEventListener("change", e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { load(JSON.parse(reader.result), f.name); save(); toast("লোড হয়েছে"); }
+      catch (err) { alert("JSON পড়া যায়নি: " + err.message); }
+    };
+    reader.readAsText(f, "utf-8");
+  });
+
+  $("list").addEventListener("input", e => {
+    const t = e.target;
+    if (!t.dataset.k) return;
+    const i = +t.dataset.i;
+    records[i][t.dataset.k] = t.value;
+    edited.add(i);
+    t.classList.toggle("bad", false);
+    save();
+  });
+
+  $("list").addEventListener("change", e => {
+    // trim when the field loses focus
+    const t = e.target;
+    if (!t.dataset.k) return;
+    records[+t.dataset.i][t.dataset.k] = clean(t.value);
+  });
+
+  $("list").addEventListener("click", e => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    const act = b.dataset.act;
+    const i = +b.dataset.i;
+    if (act === "prev") { page--; render(); window.scrollTo(0, 0); return; }
+    if (act === "next") { page++; render(); window.scrollTo(0, 0); return; }
+    if (act === "ok") { markOk(i); refreshCard(i); toast("OK করা হয়েছে"); }
+    if (act === "recheck") {
+      recheck(i); refreshCard(i);
+      toast(records[i].needs_review ? "এখনো সমস্যা আছে" : "সব ঠিক আছে ✔");
+    }
+    if (act === "del") {
+      if (!confirm(`"${clean(records[i].name)}" মুছে ফেলবেন?`)) return;
+      records.splice(i, 1);
+      // indexes after i shift by one
+      edited = new Set([...edited].filter(x => x !== i).map(x => x > i ? x - 1 : x));
+      render();
+      toast("মুছে ফেলা হয়েছে");
+    }
+    buildReasonFilter();
+    save();
+    updateStats();
+  });
+
+  function updateStats() {
+    const pending = records.filter(r => r.needs_review).length;
+    const shown = filtered().length;
+    $("stats").innerHTML =
+      `ফাইল: <b>${esc(fileName)}</b> · মোট <b>${records.length}</b> · review বাকি <b>${pending}</b> · ` +
+      `এডিট করেছেন <b>${edited.size}</b> · দেখানো হচ্ছে <b>${shown}</b>`;
+  }
+
+  ["search", "show", "reason"].forEach(id =>
+    $(id).addEventListener("input", () => { page = 0; render(); }));
+
+  $("bulkOk").addEventListener("click", () => {
+    const idx = filtered().slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+    if (!idx.length || !confirm(`এই পেজের ${idx.length}টা ওষুধ OK করবেন?`)) return;
+    idx.forEach(markOk);
+    buildReasonFilter(); save(); render();
+    toast(`${idx.length}টা OK করা হয়েছে`);
+  });
+
+  $("autoClean").addEventListener("click", () => {
+    let changed = 0;
+    records.forEach((r, i) => {
+      const n = stripSuffix(r.name);
+      if (n && n !== clean(r.name)) {
+        r.name = n;
+        recheck(i);
+        changed++;
+      }
+    });
+    buildReasonFilter(); save(); render();
+    toast(`${changed}টা নাম ক্লিন করা হয়েছে`);
+  });
+
+  $("download").addEventListener("click", () => {
+    if (!doc) return;
+    if (!Array.isArray(doc)) {
+      doc.records_needing_review = records.filter(r => r.needs_review).length;
+      if ("total_records" in doc) doc.total_records = records.length;
+    }
+    const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = fileName.replace(/\.json$/i, "") + "_reviewed.json";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    toast("ডাউনলোড শুরু হয়েছে");
+  });
+
+  // restore unsaved work from last visit
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+    if (saved && saved.doc && confirm(`আগের কাজ (${saved.fileName}) পাওয়া গেছে। আবার খুলবেন?`)) {
+      load(saved.doc, saved.fileName, saved.edited);
+    }
+  } catch (e) { /* ignore */ }
+})();
+</script>
+</body>
+</html>
